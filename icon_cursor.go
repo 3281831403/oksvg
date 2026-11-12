@@ -25,6 +25,8 @@ type IconCursor struct {
 	grad                                                 *rasterx.Gradient
 	inTitleText, inDescText, inGrad, inDefs, inDefsStyle bool
 	currentDef                                           []definition
+	// clip is non-nil while the content of a clipPath element is being parsed.
+	clip *SvgClip
 }
 
 // ReadGradURL reads an SVG format gradient url
@@ -88,6 +90,11 @@ func (c *IconCursor) PushStyle(attrs []xml.Attr) error {
 	}
 	// Make a copy of the top style
 	curStyle := c.StyleStack[len(c.StyleStack)-1]
+	// Detach the inherited clip reference slice: child elements must not
+	// mutate the clip stack of their ancestors.
+	if curStyle.clipRefs != nil {
+		curStyle.clipRefs = append([]string(nil), curStyle.clipRefs...)
+	}
 	for _, pair := range pairs {
 		kv := strings.Split(pair, ":")
 		if len(kv) >= 2 {
@@ -309,6 +316,15 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 		if k != "fill-opacity" {
 			curStyle.LineOpacity *= op
 		}
+	case "clip-path":
+		if id, ok := readClipURL(v); ok {
+			// Inherited clip paths and this element's own clip path apply
+			// together; their regions are intersected at render time.
+			curStyle.clipRefs = append(curStyle.clipRefs, id)
+		} else if strings.TrimSpace(v) == "none" {
+			// clip-path="none" disables clipping, including inherited ones.
+			curStyle.clipRefs = []string{}
+		}
 	case "transform":
 		m, err := c.parseTransform(v)
 		if err != nil {
@@ -320,11 +336,16 @@ func (c *IconCursor) readStyleAttr(curStyle *PathStyle, k, v string) error {
 }
 
 func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
+	if se.Name.Local == "clipPath" {
+		// clipPath defines clipping geometry rather than drawable content,
+		// including when it is nested inside a defs element.
+		return clipPathF(c, se.Attr)
+	}
 	var skipDef bool
 	if se.Name.Local == "radialGradient" || se.Name.Local == "linearGradient" || c.inGrad {
 		skipDef = true
 	}
-	if c.inDefs && !skipDef {
+	if c.inDefs && !skipDef && c.clip == nil {
 		ID := ""
 		for _, attr := range se.Attr {
 			if attr.Name.Local == "id" {
@@ -360,11 +381,15 @@ func (c *IconCursor) readStartElement(se xml.StartElement) (err error) {
 	}
 
 	if len(c.Path) > 0 {
+		if c.appendClipPath() {
+			// The path belongs to a clipPath element.
+			return
+		}
 		//The cursor parsed a path from the xml element
 		pathCopy := make(rasterx.Path, len(c.Path))
 		copy(pathCopy, c.Path)
 		c.icon.SVGPaths = append(c.icon.SVGPaths,
-			SvgPath{c.StyleStack[len(c.StyleStack)-1], pathCopy})
+			SvgPath{PathStyle: c.StyleStack[len(c.StyleStack)-1], Path: pathCopy})
 		c.Path = c.Path[:0]
 	}
 	return

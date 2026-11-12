@@ -1,11 +1,12 @@
 // Copyright 2017 The oksvg Authors. All rights reserved.
 // created: 2/12/2017 by S.R.Wiley
 //
-// utils.go implements translation of an SVG2.0 path into a rasterx Path.
+// utils.go implements translation of an SVG2.0 path into a rasterx.Path.
 
 package oksvg
 
 import (
+	"image"
 	"image/color"
 
 	"github.com/srwiley/rasterx"
@@ -25,6 +26,20 @@ func (svgp *SvgPath) Draw(r *rasterx.Dasher, opacity float64) {
 
 // DrawTransformed draws the compiled SvgPath into the Dasher while applying transform t.
 func (svgp *SvgPath) DrawTransformed(r *rasterx.Dasher, opacity float64, t rasterx.Matrix2D) {
+	if svgp.clipEmpty {
+		// A reference to an empty clipPath suppresses painting entirely.
+		return
+	}
+	if len(svgp.clipPaths) > 0 {
+		svgp.drawTransformedClip(r, opacity, t)
+		return
+	}
+	svgp.drawTransformedNoClip(r, opacity, t)
+}
+
+// drawTransformedNoClip contains the original DrawTransformed implementation
+// and is pixel identical to the previous behavior when no clipping applies.
+func (svgp *SvgPath) drawTransformedNoClip(r *rasterx.Dasher, opacity float64, t rasterx.Matrix2D) {
 	m := svgp.mAdder.M
 	svgp.mAdder.M = t.Mult(m)
 	defer func() { svgp.mAdder.M = m }() // Restore untransformed matrix
@@ -86,6 +101,20 @@ func (svgp *SvgPath) DrawTransformed(r *rasterx.Dasher, opacity float64, t raste
 		}
 		r.Draw()
 	}
+}
+
+// userSpaceBounds returns the bounding box of the path geometry in the
+// element user space (before the icon transform t is applied), by
+// rasterizing the transformed path into an off-screen scanner solely to read
+// back its extent. The width and height give the off-screen rasterizer size
+// and should match the destination image so that no geometry is clipped.
+func (svgp *SvgPath) userSpaceBounds(t rasterx.Matrix2D, w, h int) fixed.Rectangle26_6 {
+	scanner := rasterx.NewScannerGV(w, h, image.NewRGBA(image.Rect(0, 0, w, h)),
+		image.Rect(0, 0, w, h))
+	filler := rasterx.NewFiller(w, h, scanner)
+	adder := rasterx.MatrixAdder{M: t.Mult(svgp.mAdder.M), Adder: filler}
+	svgp.Path.AddTo(&adder)
+	return filler.Scanner.GetPathExtent()
 }
 
 // GetFillColor returns the fill color of the SvgPath if one is defined and otherwise returns colornames.Black
